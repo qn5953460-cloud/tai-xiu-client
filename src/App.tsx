@@ -8,20 +8,22 @@ export const App: React.FC = () => {
   const [betAmount, setBetAmount] = useState<number>(10000);
   const [myBets, setMyBets] = useState<{ TAI: number; XIU: number }>({ TAI: 0, XIU: 0 });
 
-  // Ref để khắc phục lỗi stale closure trong Socket Event
+  // Stale closure fix
   const myBetsRef = useRef(myBets);
   useEffect(() => {
     myBetsRef.current = myBets;
   }, [myBets]);
 
-  // Pop-up states
+  // Pop-up & Payout Notification States
   const [showRulesModal, setShowRulesModal] = useState<boolean>(false);
+  const [lastPayout, setLastPayout] = useState<{ amount: number; isWin: boolean } | null>(null);
   const [resultModal, setResultModal] = useState<{
     show: boolean;
     isWin: boolean;
     amount: number;
-    choice: BetChoice;
+    choice: string;
     totalPoints: number;
+    isTriple?: boolean;
   } | null>(null);
 
   // Chat states
@@ -44,7 +46,7 @@ export const App: React.FC = () => {
     history: ['TAI', 'XIU', 'TAI', 'TAI', 'XIU'],
   });
 
-  // Tự động đếm ngược thời gian ở client (chạy từng giây mượt mà)
+  // Client timer
   useEffect(() => {
     const timerInterval = setInterval(() => {
       setGameState((prev) => {
@@ -58,45 +60,51 @@ export const App: React.FC = () => {
     return () => clearInterval(timerInterval);
   }, []);
 
-  // Cuộn xuống cuối khung chat
+  // Auto scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, showChat]);
 
-  // Socket connection & Listening events
+  // Socket Events
   useEffect(() => {
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
 
-    // Đồng bộ trạng thái từ Server
     socket.on('game_tick', (data: GameState) => {
       setGameState(data);
 
-      // Bắt đầu ván mới
+      // Bắt đầu ván mới: Reset cược & thông báo thưởng ván cũ
       if (data.phase === 'betting' && data.timer >= 15) {
         setMyBets({ TAI: 0, XIU: 0 });
         setResultModal(null);
+        setLastPayout(null);
         hasSettledRef.current = false;
       }
 
-      // Xử lý Trả thưởng khi sang phase 'result'
+      // Phase Trả Thưởng: Tính toán kết quả & cộng/trừ tiền
       if (data.phase === 'result' && !hasSettledRef.current) {
         hasSettledRef.current = true;
 
         const currentBets = myBetsRef.current;
         const totalDice = data.dice.reduce((a, b) => a + b, 0);
-        const winChoice: BetChoice = totalDice >= 11 ? 'TAI' : 'XIU';
         
-        const wonBetAmount = winChoice === 'TAI' ? currentBets.TAI : currentBets.XIU;
+        // Kiểm tra Bão (3 xí ngầu giống nhau - Ví dụ: 1-1-1 hoặc 6-6-6)
+        const isTriple = data.dice[0] === data.dice[1] && data.dice[1] === data.dice[2];
+        const winChoice = isTriple ? 'BÃO' : (totalDice >= 11 ? 'TAI' : 'XIU');
+
+        const wonBetAmount = winChoice === 'TAI' ? currentBets.TAI : (winChoice === 'XIU' ? currentBets.XIU : 0);
         const totalInvested = currentBets.TAI + currentBets.XIU;
 
-        // Chỉ xử lý nếu người chơi có đặt cược trong ván
         if (totalInvested > 0) {
           if (wonBetAmount > 0) {
+            // Thắng cược: Nhận x2 tiền cược cửa thắng
             const payout = wonBetAmount * 2;
             const profit = payout - totalInvested;
+
+            // Cộng tiền vào tài khoản
             setBalance((prev) => prev + payout);
-            
+            setLastPayout({ amount: profit, isWin: true });
+
             setResultModal({
               show: true,
               isWin: true,
@@ -105,19 +113,22 @@ export const App: React.FC = () => {
               totalPoints: totalDice,
             });
           } else {
+            // Thua cược: Mất toàn bộ tiền đã đặt trong ván
+            setLastPayout({ amount: totalInvested, isWin: false });
+
             setResultModal({
               show: true,
               isWin: false,
               amount: totalInvested,
               choice: winChoice,
               totalPoints: totalDice,
+              isTriple,
             });
           }
         }
       }
     });
 
-    // Lắng nghe tin nhắn chat
     socket.on('receive_chat', (msg: ChatMessage) => {
       setMessages((prev) => [...prev, msg]);
     });
@@ -130,14 +141,13 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Xử lý Đặt Cược
+  // Xử lý Đặt Cược (Trừ tiền ngay khi bấm cược)
   const handleBet = (choice: BetChoice) => {
     if (gameState.phase !== 'betting' || gameState.timer <= 0) {
       alert('Đã hết thời gian đặt cược!');
       return;
     }
 
-    // Không cho phép cược 2 cửa cùng lúc
     if ((choice === 'TAI' && myBets.XIU > 0) || (choice === 'XIU' && myBets.TAI > 0)) {
       alert('Bạn chỉ được đặt vào 1 cửa trong mỗi ván!');
       return;
@@ -148,12 +158,13 @@ export const App: React.FC = () => {
       return;
     }
 
+    // Trừ tiền cược khỏi số dư hiện tại
     setBalance((prev) => prev - betAmount);
     setMyBets((prev) => ({ ...prev, [choice]: prev[choice] + betAmount }));
     socket.emit('place_bet', { choice, amount: betAmount });
   };
 
-  // Gửi Chat
+  // Chat
   const sendChatMessage = (textToSend?: string) => {
     const text = textToSend || chatInput;
     if (!text.trim()) return;
@@ -171,7 +182,6 @@ export const App: React.FC = () => {
     if (!textToSend) setChatInput('');
   };
 
-  // Điều kiện Khóa Cược
   const isBettingDisabled = gameState.phase !== 'betting' || gameState.timer <= 0;
   const isTaiDisabled = isBettingDisabled || myBets.XIU > 0;
   const isXiuDisabled = isBettingDisabled || myBets.TAI > 0;
@@ -195,6 +205,7 @@ export const App: React.FC = () => {
           </button>
         </div>
 
+        {/* Khung Số Dư + Hiệu ứng Biến Động Tiền */}
         <div className="flex items-center gap-4">
           <button
             onClick={() => setShowChat(!showChat)}
@@ -202,11 +213,23 @@ export const App: React.FC = () => {
           >
             💬 Chat {showChat ? 'Tắt' : 'Mở'}
           </button>
-          <div className="text-right">
+
+          <div className="text-right relative">
             <span className="text-xs text-slate-400 block">Số Dư</span>
             <span className="text-lg md:text-xl font-extrabold text-amber-400 font-mono">
               {balance.toLocaleString()} đ
             </span>
+
+            {/* Floating Tag hiển thị Tiền Thắng/Thua ở Header */}
+            {lastPayout && (
+              <div
+                className={`absolute -bottom-5 right-0 text-xs font-black font-mono animate-bounce ${
+                  lastPayout.isWin ? 'text-emerald-400' : 'text-rose-400'
+                }`}
+              >
+                {lastPayout.isWin ? `+${lastPayout.amount.toLocaleString()}đ` : `-${lastPayout.amount.toLocaleString()}đ`}
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -251,9 +274,25 @@ export const App: React.FC = () => {
               ))}
             </div>
 
+            {/* Kết Quả & Tiền Nhận Khi Hết Ván */}
             {gameState.phase === 'result' && (
-              <div className="mt-3 px-3 py-1 bg-amber-500/20 text-amber-300 rounded-full font-bold text-sm border border-amber-500/40 animate-pulse">
-                Tổng: {totalDice} ({totalDice >= 11 ? 'TÀI' : 'XỈU'})
+              <div className="mt-3 flex flex-col items-center gap-1">
+                <div className="px-3 py-1 bg-amber-500/20 text-amber-300 rounded-full font-bold text-sm border border-amber-500/40 animate-pulse">
+                  Tổng: {totalDice} ({gameState.dice[0] === gameState.dice[1] && gameState.dice[1] === gameState.dice[2] ? 'BÃO' : (totalDice >= 11 ? 'TÀI' : 'XỈU')})
+                </div>
+
+                {/* Badge Tiền Thắng/Thua Nổi Bật Ngay Trên Bàn */}
+                {lastPayout && (
+                  <div
+                    className={`px-3 py-0.5 rounded-full text-xs font-black font-mono border ${
+                      lastPayout.isWin
+                        ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/50'
+                        : 'bg-rose-950/80 text-rose-400 border-rose-500/50'
+                    }`}
+                  >
+                    {lastPayout.isWin ? `Lời +${lastPayout.amount.toLocaleString()}đ` : `Mất -${lastPayout.amount.toLocaleString()}đ`}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -429,17 +468,17 @@ export const App: React.FC = () => {
             <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
               <div className="p-3 bg-rose-950/40 border border-rose-800/50 rounded-xl">
                 <strong className="text-rose-400 text-sm block mb-1">🔴 CỬA TÀI (11 - 17)</strong>
-                Tổng số điểm của 3 viên xí ngầu cộng lại từ **11 đến 17 điểm**.
+                Tổng số điểm của 3 viên xí ngầu từ **11 đến 17 điểm**.
               </div>
 
               <div className="p-3 bg-sky-950/40 border border-sky-800/50 rounded-xl">
                 <strong className="text-sky-400 text-sm block mb-1">🔵 CỬA XỈU (4 - 10)</strong>
-                Tổng số điểm của 3 viên xí ngầu cộng lại từ **4 đến 10 điểm**.
+                Tổng số điểm của 3 viên xí ngầu từ **4 đến 10 điểm**.
               </div>
 
-              <div className="p-3 bg-slate-800/60 rounded-xl">
-                <strong className="text-amber-300 block mb-1">💰 Tỷ Lệ Trả Thưởng:</strong>
-                Tỷ lệ **1 ăn 1**. Đặt 50.000đ thắng thu về 100.000đ (bao gồm cả vốn gốc).
+              <div className="p-3 bg-amber-950/40 border border-amber-800/50 rounded-xl">
+                <strong className="text-amber-400 text-sm block mb-1">⚡ BÃO (Bộ 3 giống nhau)</strong>
+                Ra 3 mặt giống nhau (VD: 1-1-1 hoặc 6-6-6), nhà cái ăn cả 2 cửa Tài và Xỉu.
               </div>
             </div>
 
@@ -468,7 +507,7 @@ export const App: React.FC = () => {
                 resultModal.isWin ? 'text-amber-400' : 'text-rose-500'
               }`}
             >
-              {resultModal.isWin ? 'BẠN THẮNG LỚN!' : 'CHÚC MAY MẮN LẦN SAU'}
+              {resultModal.isWin ? 'BẠN THẮNG LỚN!' : (resultModal.isTriple ? 'BÃO - NHÀ CÁI ĂN!' : 'CHÚC MAY MẮN LẦN SAU')}
             </h2>
 
             <div className="text-xs text-slate-400 mb-4">
