@@ -8,6 +8,12 @@ export const App: React.FC = () => {
   const [betAmount, setBetAmount] = useState<number>(10000);
   const [myBets, setMyBets] = useState<{ TAI: number; XIU: number }>({ TAI: 0, XIU: 0 });
 
+  // Ref để khắc phục lỗi stale closure trong Socket Event
+  const myBetsRef = useRef(myBets);
+  useEffect(() => {
+    myBetsRef.current = myBets;
+  }, [myBets]);
+
   // Pop-up states
   const [showRulesModal, setShowRulesModal] = useState<boolean>(false);
   const [resultModal, setResultModal] = useState<{
@@ -38,60 +44,80 @@ export const App: React.FC = () => {
     history: ['TAI', 'XIU', 'TAI', 'TAI', 'XIU'],
   });
 
-  // Tự động cuộn xuống cuối khung chat khi có tin nhắn mới
+  // Tự động đếm ngược thời gian ở client (chạy từng giây mượt mà)
+  useEffect(() => {
+    const timerInterval = setInterval(() => {
+      setGameState((prev) => {
+        if (prev.timer > 0) {
+          return { ...prev, timer: prev.timer - 1 };
+        }
+        return prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(timerInterval);
+  }, []);
+
+  // Cuộn xuống cuối khung chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, showChat]);
 
+  // Socket connection & Listening events
   useEffect(() => {
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
 
-    // Lắng nghe trạng thái game từ Server
+    // Đồng bộ trạng thái từ Server
     socket.on('game_tick', (data: GameState) => {
       setGameState(data);
 
       // Bắt đầu ván mới
-      if (data.phase === 'betting' && data.timer === 15) {
+      if (data.phase === 'betting' && data.timer >= 15) {
         setMyBets({ TAI: 0, XIU: 0 });
         setResultModal(null);
         hasSettledRef.current = false;
       }
 
-      // Khi sang phase Trả Thưởng (Result)
+      // Xử lý Trả thưởng khi sang phase 'result'
       if (data.phase === 'result' && !hasSettledRef.current) {
         hasSettledRef.current = true;
 
+        const currentBets = myBetsRef.current;
         const totalDice = data.dice.reduce((a, b) => a + b, 0);
         const winChoice: BetChoice = totalDice >= 11 ? 'TAI' : 'XIU';
-        const wonBetAmount = winChoice === 'TAI' ? myBets.TAI : myBets.XIU;
-        const totalInvested = myBets.TAI + myBets.XIU;
+        
+        const wonBetAmount = winChoice === 'TAI' ? currentBets.TAI : currentBets.XIU;
+        const totalInvested = currentBets.TAI + currentBets.XIU;
 
-        if (wonBetAmount > 0) {
-          const payout = wonBetAmount * 2;
-          const profit = payout - totalInvested;
-          setBalance((prev) => prev + payout);
-          
-          setResultModal({
-            show: true,
-            isWin: true,
-            amount: profit,
-            choice: winChoice,
-            totalPoints: totalDice,
-          });
-        } else if (totalInvested > 0) {
-          setResultModal({
-            show: true,
-            isWin: false,
-            amount: totalInvested,
-            choice: winChoice,
-            totalPoints: totalDice,
-          });
+        // Chỉ xử lý nếu người chơi có đặt cược trong ván
+        if (totalInvested > 0) {
+          if (wonBetAmount > 0) {
+            const payout = wonBetAmount * 2;
+            const profit = payout - totalInvested;
+            setBalance((prev) => prev + payout);
+            
+            setResultModal({
+              show: true,
+              isWin: true,
+              amount: profit,
+              choice: winChoice,
+              totalPoints: totalDice,
+            });
+          } else {
+            setResultModal({
+              show: true,
+              isWin: false,
+              amount: totalInvested,
+              choice: winChoice,
+              totalPoints: totalDice,
+            });
+          }
         }
       }
     });
 
-    // Lắng nghe tin nhắn chat từ Server
+    // Lắng nghe tin nhắn chat
     socket.on('receive_chat', (msg: ChatMessage) => {
       setMessages((prev) => [...prev, msg]);
     });
@@ -102,12 +128,23 @@ export const App: React.FC = () => {
       socket.off('game_tick');
       socket.off('receive_chat');
     };
-  }, [myBets]);
+  }, []);
 
+  // Xử lý Đặt Cược
   const handleBet = (choice: BetChoice) => {
-    if (gameState.phase !== 'betting') return;
+    if (gameState.phase !== 'betting' || gameState.timer <= 0) {
+      alert('Đã hết thời gian đặt cược!');
+      return;
+    }
+
+    // Không cho phép cược 2 cửa cùng lúc
+    if ((choice === 'TAI' && myBets.XIU > 0) || (choice === 'XIU' && myBets.TAI > 0)) {
+      alert('Bạn chỉ được đặt vào 1 cửa trong mỗi ván!');
+      return;
+    }
+
     if (balance < betAmount) {
-      alert('Không đủ số dư!');
+      alert('Số dư không đủ!');
       return;
     }
 
@@ -116,6 +153,7 @@ export const App: React.FC = () => {
     socket.emit('place_bet', { choice, amount: betAmount });
   };
 
+  // Gửi Chat
   const sendChatMessage = (textToSend?: string) => {
     const text = textToSend || chatInput;
     if (!text.trim()) return;
@@ -132,6 +170,11 @@ export const App: React.FC = () => {
     socket.emit('send_chat', { text: text.trim() });
     if (!textToSend) setChatInput('');
   };
+
+  // Điều kiện Khóa Cược
+  const isBettingDisabled = gameState.phase !== 'betting' || gameState.timer <= 0;
+  const isTaiDisabled = isBettingDisabled || myBets.XIU > 0;
+  const isXiuDisabled = isBettingDisabled || myBets.TAI > 0;
 
   const totalDice = gameState.dice.reduce((a, b) => a + b, 0);
 
@@ -170,7 +213,7 @@ export const App: React.FC = () => {
 
       {/* Main Container */}
       <div className="w-full max-w-4xl my-auto grid grid-cols-1 lg:grid-cols-3 gap-6 py-4">
-        {/* Khung Game Bàn Cược (Chiếm 2 cột) */}
+        {/* Khung Bàn Cược */}
         <main className="lg:col-span-2 flex flex-col items-center gap-5">
           {/* Lịch sử cầu */}
           <div className="flex gap-2 p-2 bg-slate-900 border border-slate-800 rounded-full shadow-inner">
@@ -186,13 +229,13 @@ export const App: React.FC = () => {
             ))}
           </div>
 
-          {/* Khung Đếm Ngược & Xí Ngầu */}
+          {/* Đếm Ngược & Xí Ngầu */}
           <div className="relative w-64 h-64 md:w-72 md:h-72 rounded-full bg-slate-900 border-4 border-amber-500/30 flex flex-col items-center justify-center shadow-2xl shadow-amber-500/10">
             <div className="text-xs text-amber-400/80 uppercase font-semibold mb-1">
               {gameState.phase === 'betting' ? 'Thời Gian Đặt Cược' : 'Trả Thưởng'}
             </div>
 
-            <div className="text-6xl font-black font-mono text-amber-400 my-2">
+            <div className={`text-6xl font-black font-mono my-2 ${gameState.timer <= 3 && gameState.phase === 'betting' ? 'text-rose-500 animate-bounce' : 'text-amber-400'}`}>
               {gameState.timer}s
             </div>
 
@@ -209,7 +252,7 @@ export const App: React.FC = () => {
             </div>
 
             {gameState.phase === 'result' && (
-              <div className="mt-3 px-3 py-1 bg-amber-500/20 text-amber-300 rounded-full font-bold text-sm border border-amber-500/40">
+              <div className="mt-3 px-3 py-1 bg-amber-500/20 text-amber-300 rounded-full font-bold text-sm border border-amber-500/40 animate-pulse">
                 Tổng: {totalDice} ({totalDice >= 11 ? 'TÀI' : 'XỈU'})
               </div>
             )}
@@ -217,36 +260,62 @@ export const App: React.FC = () => {
 
           {/* Nút Đặt Cược TÀI / XỈU */}
           <div className="grid grid-cols-2 gap-4 w-full">
+            {/* Nút TÀI */}
             <button
               onClick={() => handleBet('TAI')}
-              disabled={gameState.phase !== 'betting'}
-              className="flex flex-col items-center justify-center p-5 bg-gradient-to-b from-rose-600 to-rose-800 hover:from-rose-500 hover:to-rose-700 disabled:opacity-40 rounded-2xl shadow-lg transition active:scale-95 border border-rose-500/50"
+              disabled={isTaiDisabled}
+              className={`flex flex-col items-center justify-center p-5 rounded-2xl shadow-lg transition border relative overflow-hidden active:scale-95 ${
+                isTaiDisabled
+                  ? 'bg-slate-800/60 border-slate-700/50 opacity-50 cursor-not-allowed'
+                  : 'bg-gradient-to-b from-rose-600 to-rose-800 hover:from-rose-500 hover:to-rose-700 border-rose-500/50'
+              }`}
             >
               <span className="text-3xl font-black tracking-wider">TÀI</span>
               <span className="text-xs text-rose-200 mt-1">11 - 17</span>
+              
               <span className="text-xs font-semibold mt-2 text-rose-100 font-mono">
                 Tổng server: {gameState.totalBetTai.toLocaleString()} đ
               </span>
+
               {myBets.TAI > 0 && (
-                <span className="text-xs bg-black/40 px-2 py-0.5 rounded-full mt-1 text-amber-300 font-mono">
+                <span className="text-xs bg-black/50 px-2 py-0.5 rounded-full mt-1 text-amber-300 font-mono font-bold">
                   Bạn đặt: {myBets.TAI.toLocaleString()} đ
+                </span>
+              )}
+
+              {isBettingDisabled && (
+                <span className="absolute top-2 right-2 bg-rose-950/80 text-rose-300 text-[10px] px-2 py-0.5 rounded-full border border-rose-700 font-bold">
+                  🔒 ĐÃ KHÓA
                 </span>
               )}
             </button>
 
+            {/* Nút XỈU */}
             <button
               onClick={() => handleBet('XIU')}
-              disabled={gameState.phase !== 'betting'}
-              className="flex flex-col items-center justify-center p-5 bg-gradient-to-b from-sky-600 to-sky-800 hover:from-sky-500 hover:to-sky-700 disabled:opacity-40 rounded-2xl shadow-lg transition active:scale-95 border border-sky-500/50"
+              disabled={isXiuDisabled}
+              className={`flex flex-col items-center justify-center p-5 rounded-2xl shadow-lg transition border relative overflow-hidden active:scale-95 ${
+                isXiuDisabled
+                  ? 'bg-slate-800/60 border-slate-700/50 opacity-50 cursor-not-allowed'
+                  : 'bg-gradient-to-b from-sky-600 to-sky-800 hover:from-sky-500 hover:to-sky-700 border-sky-500/50'
+              }`}
             >
               <span className="text-3xl font-black tracking-wider">XỈU</span>
               <span className="text-xs text-sky-200 mt-1">4 - 10</span>
+
               <span className="text-xs font-semibold mt-2 text-sky-100 font-mono">
                 Tổng server: {gameState.totalBetXiu.toLocaleString()} đ
               </span>
+
               {myBets.XIU > 0 && (
-                <span className="text-xs bg-black/40 px-2 py-0.5 rounded-full mt-1 text-amber-300 font-mono">
+                <span className="text-xs bg-black/50 px-2 py-0.5 rounded-full mt-1 text-amber-300 font-mono font-bold">
                   Bạn đặt: {myBets.XIU.toLocaleString()} đ
+                </span>
+              )}
+
+              {isBettingDisabled && (
+                <span className="absolute top-2 right-2 bg-sky-950/80 text-sky-300 text-[10px] px-2 py-0.5 rounded-full border border-sky-700 font-bold">
+                  🔒 ĐÃ KHÓA
                 </span>
               )}
             </button>
@@ -258,11 +327,12 @@ export const App: React.FC = () => {
               <button
                 key={amt}
                 onClick={() => setBetAmount(amt)}
+                disabled={isBettingDisabled}
                 className={`px-4 py-2 rounded-lg font-bold text-xs font-mono transition-all ${
                   betAmount === amt
                     ? 'bg-amber-500 text-slate-950 shadow-md scale-105'
                     : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
+                } ${isBettingDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 {(amt / 1000).toLocaleString()}k
               </button>
@@ -270,7 +340,7 @@ export const App: React.FC = () => {
           </div>
         </main>
 
-        {/* Khung Chat Trực Tuyến (Chiếm 1 cột) */}
+        {/* Khung Chat Trực Tuyến */}
         {showChat && (
           <aside className="w-full bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between h-[420px] lg:h-auto shadow-xl backdrop-blur-md">
             <div className="flex justify-between items-center pb-2 border-b border-slate-800 mb-2">
@@ -300,7 +370,7 @@ export const App: React.FC = () => {
               <div ref={chatEndRef} />
             </div>
 
-            {/* Quick Chat Buttons (Chat Nhanh) */}
+            {/* Chat nhanh */}
             <div className="py-2 border-t border-slate-800/80 my-2">
               <div className="text-[10px] text-slate-400 mb-1 font-semibold">Chat nhanh:</div>
               <div className="flex flex-wrap gap-1">
@@ -342,10 +412,10 @@ export const App: React.FC = () => {
         )}
       </div>
 
-      {/* POP-UP LUẬT CHƠI (Modal) */}
+      {/* MODAL LUẬT CHƠI */}
       {showRulesModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl relative animate-in fade-in zoom-in duration-200">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
             <h3 className="text-xl font-black text-amber-400 mb-4 border-b border-slate-800 pb-2 flex justify-between items-center">
               <span>🎲 LUẬT CHƠI TÀI XỈU</span>
               <button
@@ -369,7 +439,7 @@ export const App: React.FC = () => {
 
               <div className="p-3 bg-slate-800/60 rounded-xl">
                 <strong className="text-amber-300 block mb-1">💰 Tỷ Lệ Trả Thưởng:</strong>
-                Tỷ lệ **1 ăn 1**. Đặt 50.000đ thắng thu về 100.000đ (bao gồm cả vốn).
+                Tỷ lệ **1 ăn 1**. Đặt 50.000đ thắng thu về 100.000đ (bao gồm cả vốn gốc).
               </div>
             </div>
 
@@ -383,13 +453,13 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* POP-UP KẾT QUẢ THẮNG / THUA (Modal Result) */}
+      {/* MODAL KẾT QUẢ THẮNG / THUA */}
       {resultModal?.show && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
           <div
             className={`bg-slate-900 border-2 ${
               resultModal.isWin ? 'border-amber-500 shadow-amber-500/20' : 'border-rose-600/60 shadow-rose-600/20'
-            } rounded-3xl max-w-sm w-full p-6 text-center shadow-2xl relative animate-bounce-short`}
+            } rounded-3xl max-w-sm w-full p-6 text-center shadow-2xl relative animate-in fade-in zoom-in duration-200`}
           >
             <div className="text-5xl mb-2">{resultModal.isWin ? '🎉' : '😭'}</div>
 
