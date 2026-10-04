@@ -27,7 +27,7 @@ export interface PayoutData {
   choice: Choice;
 }
 
-const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
+const SOCKET_URL = (import.meta.env.VITE_SOCKET_URL as string) || 'http://localhost:5000';
 const CHIP_VALUES = [10000, 50000, 100000, 500000, 1000000];
 
 export const App: React.FC = () => {
