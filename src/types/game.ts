@@ -8,3 +8,11 @@ export interface GameState {
   totalBetXiu: number;
   history: BetChoice[];
 }
+
+export interface ChatMessage {
+  id: string;
+  user: string;
+  text: string;
+  time: string;
+  isMe?: boolean;
+}
